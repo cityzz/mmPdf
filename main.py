@@ -1,73 +1,93 @@
 import fitz  # PyMuPDF
 import re
+import argparse
+import gc
+import os
+import sys
 
-def heavy_duty_pad_pdf(input_path, output_path):
-    # Open the source document
-    # Using 'with' ensures the file is closed properly
+def save_and_close(doc, name):
+    """Saves with high compression and releases memory."""
+    try:
+        doc.save(name, garbage=4, deflate=True, clean=True)
+        doc.close()
+        gc.collect()
+    except Exception as e:
+        print(f"Error saving {name}: {e}")
+
+def process_pdf(input_path, output_prefix, batch_size):
+    if not os.path.exists(input_path):
+        print(f"Error: The file '{input_path}' does not exist.")
+        sys.exit(1)
+
     src = fitz.open(input_path)
-    dest = fitz.open()
-
+    # Regex to find "Page 1 of Y"
     start_pattern = re.compile(r"Page\s+1\s+of", re.IGNORECASE)
 
-    # We store only integers (page indices) in this list.
-    # Even for 100,000 pages, a list of integers is tiny in RAM.
     start_indices = []
+    print(f"Scanning {len(src)} pages for statement boundaries...")
 
-    print("Scanning document structure...")
     for i in range(len(src)):
-        # We only extract text from the bottom portion of the page
-        # to save CPU and RAM.
         page = src[i]
-
-        # Define a "footer area" (bottom 10% of the page)
-        # Rect(x0, y0, x1, y1)
+        # Only scan the bottom 10% of the page to save RAM/CPU
         footer_rect = fitz.Rect(0, page.rect.height * 0.9, page.rect.width, page.rect.height)
-        footer_text = page.get_text("text", clip=footer_rect)
-
-        if start_pattern.search(footer_text):
+        if start_pattern.search(page.get_text("text", clip=footer_rect)):
             start_indices.append(i)
 
-    start_indices.append(len(src)) # End boundary
+    start_indices.append(len(src))
+    total_statements = len(start_indices) - 1
+    print(f"Found {total_statements} individual statements.")
 
-    print(f"Processing {len(start_indices)-1} statements...")
+    dest = fitz.open()
+    statements_in_current_batch = 0
+    batch_count = 1
 
-    for j in range(len(start_indices) - 1):
+    for j in range(total_statements):
         start = start_indices[j]
         end = start_indices[j+1]
         length = end - start
 
-        # Insert the block of pages
         dest.insert_pdf(src, from_page=start, to_page=end-1)
 
+        # Add blank page if the individual statement length is odd
         if length % 2 != 0:
-            # Add blank page matching the size of the last statement page
             last_page_rect = src[end-1].rect
             dest.new_page(width=last_page_rect.width, height=last_page_rect.height)
 
-        # Every 50 statements, we tell Python to try and clear unused memory
-        if j % 50 == 0:
-            import gc
-            gc.collect()
+        statements_in_current_batch += 1
 
-    print("Saving file (this may take a moment for 5000+ pages)...")
+        # Save batch if limit reached (and batch_size is not -1)
+        if batch_size != -1 and statements_in_current_batch >= batch_size:
+            output_name = f"{output_prefix}_part_{batch_count}.pdf"
+            print(f"Writing {output_name}...")
+            save_and_close(dest, output_name)
 
-    # CRITICAL FOR LARGE FILES:
-    # garbage=4: Remove all unused objects and compact the file
-    # deflate=True: Compress the internal streams
-    dest.save(
-        output_path,
-        garbage=4,
-        deflate=True,
-        clean=True
+            dest = fitz.open()
+            statements_in_current_batch = 0
+            batch_count += 1
+
+    # Final save for the remaining pages or the combined file
+    if len(dest) > 0:
+        output_name = f"{output_prefix}_combined.pdf" if batch_size == -1 else f"{output_prefix}_part_{batch_count}.pdf"
+        print(f"Writing {output_name}...")
+        save_and_close(dest, output_name)
+
+    src.close()
+    print("Processing complete.")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Split and pad multi-tenant PDF statements.")
+
+    parser.add_argument("input", help="Path to the input PDF file")
+    parser.add_argument("output", help="Prefix for the output file(s)")
+
+    # Optional argument: if not provided, it defaults to -1
+    parser.add_argument(
+        "batch_size",
+        type=int,
+        nargs='?',
+        default=-1,
+        help="Statements per file. Default is -1 (combined file)."
     )
 
-    dest.close()
-    src.close()
-    print("Finished!")
-
-# Execute
-
-
-input_file = "combined-statements.pdf"
-
-heavy_duty_pad_pdf(input_file, "compact_output.pdf")
+    args = parser.parse_args()
+    process_pdf(args.input, args.output, args.batch_size)
