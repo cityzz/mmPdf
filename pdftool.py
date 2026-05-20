@@ -14,11 +14,46 @@ def save_and_close(doc, name):
     except Exception as e:
         print(f"[!] Error saving {name}: {e}")
 
-def process_pdf(args):
-    if not os.path.exists(args.input):
-        print(f"[!] Error: The file '{args.input}' does not exist.")
+def combine_pdfs(input_dir, output_name):
+    """Combines all PDFs in a directory into a single PDF."""
+    if not os.path.isdir(input_dir):
+        print(f"[!] Error: '{input_dir}' is not a valid directory.")
         sys.exit(1)
 
+    pdf_files = [f for f in os.listdir(input_dir) if f.lower().endswith('.pdf')]
+    pdf_files.sort()  # Ensure predictable, alphabetical order
+
+    if not pdf_files:
+        print(f"[!] No PDFs found in directory: '{input_dir}'")
+        sys.exit(1)
+
+    print(f"[*] Found {len(pdf_files)} PDFs in '{input_dir}'. Starting merge...")
+
+    dest = fitz.open()
+
+    for i, filename in enumerate(pdf_files):
+        file_path = os.path.join(input_dir, filename)
+        try:
+            src = fitz.open(file_path)
+            dest.insert_pdf(src)
+            src.close()
+        except Exception as e:
+            print(f"[!] Error reading {filename}: {e}")
+
+        # Manually invoke garbage collection to keep memory low during huge batches
+        if (i + 1) % 100 == 0:
+            gc.collect()
+            print(f"[*] Merged {i + 1} / {len(pdf_files)} files...")
+
+    if not output_name.lower().endswith('.pdf'):
+        output_name += ".pdf"
+
+    print(f"[>] Saving combined PDF to {output_name}...")
+    save_and_close(dest, output_name)
+    print("[+] Combine task complete.")
+
+def process_pdf(args):
+    """Original processing logic for a single PDF statement."""
     src = fitz.open(args.input)
     start_pattern = re.compile(r"Page\s+1\s+of", re.IGNORECASE)
 
@@ -58,10 +93,8 @@ def process_pdf(args):
 
                 # Vertical alignment
                 if args.space_top:
-                    # Push to bottom, leaving all empty space at the top
                     y_margin = rect.height - new_h
                 else:
-                    # Center vertically
                     y_margin = (rect.height - new_h) / 2
 
                 target_rect = fitz.Rect(x_margin, y_margin, x_margin + new_w, y_margin + new_h)
@@ -94,10 +127,15 @@ def process_pdf(args):
     print("[+] All tasks complete.")
 
 def main():
-    parser = argparse.ArgumentParser(description="Multi-function PDF Processor (Shrink, Pad, Split)")
+    parser = argparse.ArgumentParser(description="Multi-function PDF Processor (Shrink, Pad, Split, Combine)")
 
-    parser.add_argument("input", help="Path to input PDF")
-    parser.add_argument("output", help="Output filename prefix")
+    # Made these nargs='?' so they don't block the execution if --combine is used instead
+    parser.add_argument("input", nargs='?', help="Path to input PDF (for standard processing)")
+    parser.add_argument("output", nargs='?', help="Output filename prefix (for standard processing)")
+
+    # New combine flag that accepts exactly 2 values
+    parser.add_argument("--combine", nargs=2, metavar=('input_folder', 'output_pdf'),
+                        help="Combine all PDFs in a folder: --combine [input_folder] [output_pdf]")
 
     parser.add_argument("--shrink", type=float, default=1.0,
                         help="Scale factor (0.1 to 1.0). Default 1.0 (no shrink).")
@@ -113,11 +151,26 @@ def main():
 
     args = parser.parse_args()
 
-    if not (0 < args.shrink <= 1.0):
-        print("[!] Error: Shrink must be between 0 and 1.")
-        sys.exit(1)
+    # Route execution based on which inputs were provided
+    if args.combine:
+        folder, out_pdf = args.combine
+        combine_pdfs(folder, out_pdf)
+    else:
+        # If --combine isn't used, check if the standard positionals are present
+        if not args.input or not args.output:
+            parser.print_help()
+            print("\n[!] Error: Provide 'input' and 'output' OR use '--combine input_folder output_pdf'")
+            sys.exit(1)
 
-    process_pdf(args)
+        if not os.path.exists(args.input):
+            print(f"[!] Error: The file '{args.input}' does not exist.")
+            sys.exit(1)
+
+        if not (0 < args.shrink <= 1.0):
+            print("[!] Error: Shrink must be between 0 and 1.")
+            sys.exit(1)
+
+        process_pdf(args)
 
 if __name__ == "__main__":
     main()
