@@ -232,8 +232,8 @@ def main():
                         help="Number of statements per output file. Default -1 (all in one).")
 
     # 新增参数：设定区分 surplus 的页数阈值
-    parser.add_argument("--surplus_pages", type=int, default=5,
-                        help="Maximum page count for a 'normal' statement. Statements with more pages go to _surplus. Default 5.")
+    parser.add_argument("--surplus_pages", type=int, default=4,
+                        help="Maximum page count for a 'normal' statement. Statements with more pages go to _surplus. Default 4.")
 
     args = parser.parse_args()
 
