@@ -15,7 +15,7 @@ def save_and_close(doc, name):
         print(f"[!] Error saving {name}: {e}")
 
 def combine_pdfs(input_dir, output_name, args):
-    """Combines all PDFs in a directory, separating >5 page docs, with shrink and pad support."""
+    """Combines all PDFs in a directory, separating > surplus_pages docs, with shrink, pad, and batching support."""
     if not os.path.isdir(input_dir):
         print(f"[!] Error: '{input_dir}' is not a valid directory.")
         sys.exit(1)
@@ -33,16 +33,20 @@ def combine_pdfs(input_dir, output_name, args):
     if not output_name.lower().endswith('.pdf'):
         output_name += ".pdf"
 
-    # 构造超过5页的超额文件名
     base_name, ext = os.path.splitext(output_name)
-    surplus_name = f"{base_name}_surplus{ext}"
 
-    # 初始化两个 PDF 文档容器
+    # 初始化文档容器和计数器
     dest_normal = fitz.open()
     dest_surplus = fitz.open()
 
-    normal_count = 0
-    surplus_count = 0
+    normal_batch_count = 1
+    surplus_batch_count = 1
+
+    normal_in_current_batch = 0
+    surplus_in_current_batch = 0
+
+    total_normal_saved = 0
+    total_surplus_saved = 0
 
     for i, filename in enumerate(pdf_files):
         file_path = os.path.join(input_dir, filename)
@@ -50,22 +54,17 @@ def combine_pdfs(input_dir, output_name, args):
             src = fitz.open(file_path)
             page_count = len(src)
 
-            # 根据页数决定分流到哪个容器
-            current_dest = dest_surplus if page_count > 5 else dest_normal
-            if page_count > 5:
-                surplus_count += 1
-            else:
-                normal_count += 1
+            # 判断分流：是正常文件还是超额文件
+            is_surplus = page_count > args.surplus_pages
+            current_dest = dest_surplus if is_surplus else dest_normal
 
-            # 遍历当前PDF的每一页，应用 shrink 和 pad 逻辑
+            # 遍历当前PDF的每一页，应用 shrink 逻辑
             for page_num in range(page_count):
                 src_page = src[page_num]
                 rect = src_page.rect
 
-                # 创建新页面
                 new_page = current_dest.new_page(width=rect.width, height=rect.height)
 
-                # 处理缩放逻辑
                 if args.shrink < 1.0:
                     new_w = rect.width * args.shrink
                     new_h = rect.height * args.shrink
@@ -82,6 +81,31 @@ def combine_pdfs(input_dir, output_name, args):
                 current_dest.new_page(width=last_rect.width, height=last_rect.height)
 
             src.close()
+
+            # 更新当前 Batch 的计数
+            if is_surplus:
+                surplus_in_current_batch += 1
+                total_surplus_saved += 1
+                # 触发超额文件的 Batch 保存
+                if args.batch_size != -1 and surplus_in_current_batch >= args.batch_size:
+                    out_name = f"{base_name}_surplus_part_{surplus_batch_count}{ext}"
+                    print(f"[>] Writing {out_name} ({surplus_in_current_batch} files)...")
+                    save_and_close(dest_surplus, out_name)
+                    dest_surplus = fitz.open()
+                    surplus_in_current_batch = 0
+                    surplus_batch_count += 1
+            else:
+                normal_in_current_batch += 1
+                total_normal_saved += 1
+                # 触发正常文件的 Batch 保存
+                if args.batch_size != -1 and normal_in_current_batch >= args.batch_size:
+                    out_name = f"{base_name}_part_{normal_batch_count}{ext}"
+                    print(f"[>] Writing {out_name} ({normal_in_current_batch} files)...")
+                    save_and_close(dest_normal, out_name)
+                    dest_normal = fitz.open()
+                    normal_in_current_batch = 0
+                    normal_batch_count += 1
+
         except Exception as e:
             print(f"[!] Error reading {filename}: {e}")
 
@@ -91,21 +115,30 @@ def combine_pdfs(input_dir, output_name, args):
             print(f"[*] Processed {i + 1} / {len(pdf_files)} files...")
 
     print("---")
-    # 保存正常合并的文件
+
+    # 循环结束后，保存最后一批（或不分批时的全部文件）
     if len(dest_normal) > 0:
-        print(f"[>] Saving normal combined PDF ({normal_count} files) to {output_name}...")
-        save_and_close(dest_normal, output_name)
+        if args.batch_size == -1:
+            out_name = output_name  # 不分批，用原名
+        else:
+            out_name = f"{base_name}_part_{normal_batch_count}{ext}"
+        print(f"[>] Saving normal combined PDF to {out_name}...")
+        save_and_close(dest_normal, out_name)
     else:
         dest_normal.close()
 
-    # 保存超过5页合并的文件
     if len(dest_surplus) > 0:
-        print(f"[>] Saving surplus combined PDF ({surplus_count} files) to {surplus_name}...")
-        save_and_close(dest_surplus, surplus_name)
+        if args.batch_size == -1:
+            out_name = f"{base_name}_surplus{ext}"  # 不分批，加 _surplus
+        else:
+            out_name = f"{base_name}_surplus_part_{surplus_batch_count}{ext}"
+        print(f"[>] Saving surplus combined PDF to {out_name}...")
+        save_and_close(dest_surplus, out_name)
     else:
         dest_surplus.close()
 
-    print("[+] Combine task complete.")
+    print(f"[+] Combine task complete. (Total Normal: {total_normal_saved}, Total Surplus: {total_surplus_saved})")
+
 
 def process_pdf(args):
     """Original processing logic for a single PDF statement."""
@@ -176,6 +209,7 @@ def process_pdf(args):
     src.close()
     print("[+] All tasks complete.")
 
+
 def main():
     parser = argparse.ArgumentParser(description="Multi-function PDF Processor (Shrink, Pad, Split, Combine)")
 
@@ -197,6 +231,10 @@ def main():
     parser.add_argument("--batch_size", type=int, default=-1,
                         help="Number of statements per output file. Default -1 (all in one).")
 
+    # 新增参数：设定区分 surplus 的页数阈值
+    parser.add_argument("--surplus_pages", type=int, default=5,
+                        help="Maximum page count for a 'normal' statement. Statements with more pages go to _surplus. Default 5.")
+
     args = parser.parse_args()
 
     # 验证缩放参数
@@ -204,10 +242,14 @@ def main():
         print("[!] Error: Shrink must be between 0 and 1.")
         sys.exit(1)
 
+    # 验证 surplus_pages
+    if args.surplus_pages < 1:
+        print("[!] Error: max_pages must be at least 1.")
+        sys.exit(1)
+
     # 路由执行
     if args.combine:
         folder, out_pdf = args.combine
-        # 传入 args 使得 combine 内部可以使用 shrink 和 pad
         combine_pdfs(folder, out_pdf, args)
     else:
         if not args.input or not args.output:
