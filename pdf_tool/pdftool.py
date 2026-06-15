@@ -14,8 +14,8 @@ def save_and_close(doc, name):
     except Exception as e:
         print(f"[!] Error saving {name}: {e}")
 
-def combine_pdfs(input_dir, output_name):
-    """Combines all PDFs in a directory into a single PDF, separating >5 page documents."""
+def combine_pdfs(input_dir, output_name, args):
+    """Combines all PDFs in a directory, separating >5 page docs, with shrink and pad support."""
     if not os.path.isdir(input_dir):
         print(f"[!] Error: '{input_dir}' is not a valid directory.")
         sys.exit(1)
@@ -33,7 +33,7 @@ def combine_pdfs(input_dir, output_name):
     if not output_name.lower().endswith('.pdf'):
         output_name += ".pdf"
 
-    # 构造超过5页的超额文件名 (例如: result.pdf -> result_surplus.pdf)
+    # 构造超过5页的超额文件名
     base_name, ext = os.path.splitext(output_name)
     surplus_name = f"{base_name}_surplus{ext}"
 
@@ -50,39 +50,60 @@ def combine_pdfs(input_dir, output_name):
             src = fitz.open(file_path)
             page_count = len(src)
 
-            # 根据页数分流
+            # 根据页数决定分流到哪个容器
+            current_dest = dest_surplus if page_count > 5 else dest_normal
             if page_count > 5:
-                dest_surplus.insert_pdf(src)
                 surplus_count += 1
             else:
-                dest_normal.insert_pdf(src)
                 normal_count += 1
+
+            # 遍历当前PDF的每一页，应用 shrink 和 pad 逻辑
+            for page_num in range(page_count):
+                src_page = src[page_num]
+                rect = src_page.rect
+
+                # 创建新页面
+                new_page = current_dest.new_page(width=rect.width, height=rect.height)
+
+                # 处理缩放逻辑
+                if args.shrink < 1.0:
+                    new_w = rect.width * args.shrink
+                    new_h = rect.height * args.shrink
+                    x_margin = (rect.width - new_w) / 2
+                    y_margin = rect.height - new_h if args.space_top else (rect.height - new_h) / 2
+                    target_rect = fitz.Rect(x_margin, y_margin, x_margin + new_w, y_margin + new_h)
+                    new_page.show_pdf_page(target_rect, src, page_num)
+                else:
+                    new_page.show_pdf_page(rect, src, page_num)
+
+            # 处理奇数页补空白页逻辑 (--pad)
+            if args.pad and page_count % 2 != 0:
+                last_rect = src[page_count - 1].rect
+                current_dest.new_page(width=last_rect.width, height=last_rect.height)
 
             src.close()
         except Exception as e:
             print(f"[!] Error reading {filename}: {e}")
 
-        # 每 100 个文件手动释放一次内存
+        # 每 100 个文件释放一次内存
         if (i + 1) % 100 == 0:
             gc.collect()
             print(f"[*] Processed {i + 1} / {len(pdf_files)} files...")
 
     print("---")
-    # 保存正常合并的文件（只有在里面有内容时才保存）
+    # 保存正常合并的文件
     if len(dest_normal) > 0:
         print(f"[>] Saving normal combined PDF ({normal_count} files) to {output_name}...")
         save_and_close(dest_normal, output_name)
     else:
         dest_normal.close()
-        print("[*] No files with <= 5 pages found. Normal PDF not created.")
 
-    # 保存超过5页合并的文件（只有在里面有内容时才保存）
+    # 保存超过5页合并的文件
     if len(dest_surplus) > 0:
         print(f"[>] Saving surplus combined PDF ({surplus_count} files) to {surplus_name}...")
         save_and_close(dest_surplus, surplus_name)
     else:
         dest_surplus.close()
-        print("[*] No files with > 5 pages found. Surplus PDF not created.")
 
     print("[+] Combine task complete.")
 
@@ -121,16 +142,11 @@ def process_pdf(args):
             if args.shrink < 1.0:
                 new_w = rect.width * args.shrink
                 new_h = rect.height * args.shrink
-
-                # Horizontal center
                 x_margin = (rect.width - new_w) / 2
-
-                # Vertical alignment
                 if args.space_top:
                     y_margin = rect.height - new_h
                 else:
                     y_margin = (rect.height - new_h) / 2
-
                 target_rect = fitz.Rect(x_margin, y_margin, x_margin + new_w, y_margin + new_h)
                 new_page.show_pdf_page(target_rect, src, page_num)
             else:
@@ -163,11 +179,9 @@ def process_pdf(args):
 def main():
     parser = argparse.ArgumentParser(description="Multi-function PDF Processor (Shrink, Pad, Split, Combine)")
 
-    # Made these nargs='?' so they don't block the execution if --combine is used instead
     parser.add_argument("input", nargs='?', help="Path to input PDF (for standard processing)")
     parser.add_argument("output", nargs='?', help="Output filename prefix (for standard processing)")
 
-    # New combine flag that accepts exactly 2 values
     parser.add_argument("--combine", nargs=2, metavar=('input_folder', 'output_pdf'),
                         help="Combine all PDFs in a folder: --combine [input_folder] [output_pdf]")
 
@@ -185,12 +199,17 @@ def main():
 
     args = parser.parse_args()
 
-    # Route execution based on which inputs were provided
+    # 验证缩放参数
+    if not (0 < args.shrink <= 1.0):
+        print("[!] Error: Shrink must be between 0 and 1.")
+        sys.exit(1)
+
+    # 路由执行
     if args.combine:
         folder, out_pdf = args.combine
-        combine_pdfs(folder, out_pdf)
+        # 传入 args 使得 combine 内部可以使用 shrink 和 pad
+        combine_pdfs(folder, out_pdf, args)
     else:
-        # If --combine isn't used, check if the standard positionals are present
         if not args.input or not args.output:
             parser.print_help()
             print("\n[!] Error: Provide 'input' and 'output' OR use '--combine input_folder output_pdf'")
@@ -198,10 +217,6 @@ def main():
 
         if not os.path.exists(args.input):
             print(f"[!] Error: The file '{args.input}' does not exist.")
-            sys.exit(1)
-
-        if not (0 < args.shrink <= 1.0):
-            print("[!] Error: Shrink must be between 0 and 1.")
             sys.exit(1)
 
         process_pdf(args)
