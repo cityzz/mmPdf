@@ -15,7 +15,7 @@ def save_and_close(doc, name):
         print(f"[!] Error saving {name}: {e}")
 
 def combine_pdfs(input_dir, output_name):
-    """Combines all PDFs in a directory into a single PDF."""
+    """Combines all PDFs in a directory into a single PDF, separating >5 page documents."""
     if not os.path.isdir(input_dir):
         print(f"[!] Error: '{input_dir}' is not a valid directory.")
         sys.exit(1)
@@ -29,27 +29,61 @@ def combine_pdfs(input_dir, output_name):
 
     print(f"[*] Found {len(pdf_files)} PDFs in '{input_dir}'. Starting merge...")
 
-    dest = fitz.open()
+    # 规范化主输出文件名
+    if not output_name.lower().endswith('.pdf'):
+        output_name += ".pdf"
+
+    # 构造超过5页的超额文件名 (例如: result.pdf -> result_surplus.pdf)
+    base_name, ext = os.path.splitext(output_name)
+    surplus_name = f"{base_name}_surplus{ext}"
+
+    # 初始化两个 PDF 文档容器
+    dest_normal = fitz.open()
+    dest_surplus = fitz.open()
+
+    normal_count = 0
+    surplus_count = 0
 
     for i, filename in enumerate(pdf_files):
         file_path = os.path.join(input_dir, filename)
         try:
             src = fitz.open(file_path)
-            dest.insert_pdf(src)
+            page_count = len(src)
+
+            # 根据页数分流
+            if page_count > 5:
+                dest_surplus.insert_pdf(src)
+                surplus_count += 1
+            else:
+                dest_normal.insert_pdf(src)
+                normal_count += 1
+
             src.close()
         except Exception as e:
             print(f"[!] Error reading {filename}: {e}")
 
-        # Manually invoke garbage collection to keep memory low during huge batches
+        # 每 100 个文件手动释放一次内存
         if (i + 1) % 100 == 0:
             gc.collect()
-            print(f"[*] Merged {i + 1} / {len(pdf_files)} files...")
+            print(f"[*] Processed {i + 1} / {len(pdf_files)} files...")
 
-    if not output_name.lower().endswith('.pdf'):
-        output_name += ".pdf"
+    print("---")
+    # 保存正常合并的文件（只有在里面有内容时才保存）
+    if len(dest_normal) > 0:
+        print(f"[>] Saving normal combined PDF ({normal_count} files) to {output_name}...")
+        save_and_close(dest_normal, output_name)
+    else:
+        dest_normal.close()
+        print("[*] No files with <= 5 pages found. Normal PDF not created.")
 
-    print(f"[>] Saving combined PDF to {output_name}...")
-    save_and_close(dest, output_name)
+    # 保存超过5页合并的文件（只有在里面有内容时才保存）
+    if len(dest_surplus) > 0:
+        print(f"[>] Saving surplus combined PDF ({surplus_count} files) to {surplus_name}...")
+        save_and_close(dest_surplus, surplus_name)
+    else:
+        dest_surplus.close()
+        print("[*] No files with > 5 pages found. Surplus PDF not created.")
+
     print("[+] Combine task complete.")
 
 def process_pdf(args):
