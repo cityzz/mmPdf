@@ -1,12 +1,23 @@
-## pip install pandas openpyxl
-
+import argparse
+import os
 import pandas as pd
 
+'''
+pip install pandas openpyxl
+conda install pandas openpyxl
+'''
 
-def compare_with_double_check(
-    file1_path, file2_path, output1_path, output2_path
-):
-    print("正在加载 Excel 文件...")
+def compare_with_double_check(file1_path, file2_path):
+    # 自动生成输出文件名 (保留原有的扩展名)
+    name1, ext1 = os.path.splitext(file1_path)
+    name2, ext2 = os.path.splitext(file2_path)
+    output1_path = f"{name1}_res{ext1}"
+    output2_path = f"{name2}_res{ext2}"
+
+    print(f"正在加载 Excel 文件...")
+    print(f"表格 1: {file1_path}")
+    print(f"表格 2: {file2_path}")
+
     df1 = pd.read_excel(file1_path)
     df2 = pd.read_excel(file2_path)
 
@@ -32,9 +43,7 @@ def compare_with_double_check(
     )
 
     # 3. 准备两种拼接方式
-    # 方式 A: Surname + First Name (正常顺序)
     df2["Combined_Normal"] = surname_clean + firstname_clean
-    # 方式 B: First Name + Surname (反向顺序)
     df2["Combined_Reverse"] = firstname_clean + surname_clean
 
     # 4. 生成表格1的对比集合
@@ -42,24 +51,16 @@ def compare_with_double_check(
 
     # --- 开始比对表格 2 ---
     print("正在对表格2进行双重交叉比对...")
-
-    # 第一轮：正常顺序比对
     df2["对比结果"] = df2["Combined_Normal"].apply(
         lambda x: "正常" if x in set_client_1 else "表格1缺失"
     )
 
-    # 第二轮：专门针对第一轮“缺失”的行，用反向顺序再次确定
-    # 初始化“二次确认结果”列，默认和第一轮一致
     df2["二次确认结果"] = df2["对比结果"]
-
-    # 找出第一轮缺失的行的索引
     missing_idx = df2[df2["对比结果"] == "表格1缺失"].index
 
-    # 遍历这些缺失的行，用反向拼接去表格1里找
     for idx in missing_idx:
         reverse_name = df2.loc[idx, "Combined_Reverse"]
         if reverse_name in set_client_1:
-            # 如果反向找到了，标记为已确认，并注明是顺序颠倒
             df2.loc[idx, "二次确认结果"] = (
                 "正常 (已通过 Firstname+Surname 确认)"
             )
@@ -67,7 +68,6 @@ def compare_with_double_check(
             df2.loc[idx, "二次确认结果"] = "绝对缺失 (双向比对皆无)"
 
     # --- 开始比对表格 1 ---
-    # 表格1需要同时看表格2的“正向”和“反向”集合
     set_combined_normal = set(df2["Combined_Normal"])
     set_combined_reverse = set(df2["Combined_Reverse"])
 
@@ -83,7 +83,7 @@ def compare_with_double_check(
     df1 = df1.drop(columns=["Client_Clean"])
     df2 = df2.drop(columns=["Combined_Normal", "Combined_Reverse"])
 
-    # 6. 严格限制表格1的输出列（防止多出 Statement.1）
+    # 6. 严格限制表格1的输出列
     standard_cols_1 = ["Client", "Statement", "对比结果"]
     final_cols_1 = [col for col in standard_cols_1 if col in df1.columns]
     df1_final = df1[final_cols_1]
@@ -92,19 +92,38 @@ def compare_with_double_check(
     df1_final.to_excel(output1_path, index=False)
     df2.to_excel(output2_path, index=False)
 
-    print("双重对比完成！已成功保存结果。")
+    print("-" * 40)
+    print("对比完成！文件已成功保存为：")
+    print(f" -> {output1_path}")
+    print(f" -> {output2_path}")
+    print("-" * 40)
 
 
-
-# ==================== 参数配置与执行 ====================
+# ==================== 命令行参数解析（已升级别名） ====================
 if __name__ == "__main__":
-    # 请在此处替换为你的实际文件名和路径
-    FILE_1 = "Statement_ID_List.xlsx"  # 包含 Client, Statement
-    FILE_2 = "TP_Client_names.xlsx"  # 包含 Surname, First Name 等
+    parser = argparse.ArgumentParser(
+        description="Excel 姓名跨表双向智能比对工具"
+    )
 
-    # 输出结果的文件名
-    OUTPUT_1 = "Statement_ID_List_res.xlsx"
-    OUTPUT_2 = "TP_Client_names_res.xlsx"
+    # 同时支持 --f1 和 --file1。代码内部通过 args.file1 来获取具体的值
+    parser.add_argument(
+        "--f1",
+        "--file1",
+        dest="file1",
+        required=True,
+        help="表格1的路径 (包含 Client 和 Statement 列)",
+    )
 
-    # 执行对比函数
-    compare_with_double_check(FILE_1, FILE_2, OUTPUT_1, OUTPUT_2)
+    # 同时支持 --f2 和 --file2。代码内部通过 args.file2 来获取具体的值
+    parser.add_argument(
+        "--f2",
+        "--file2",
+        dest="file2",
+        required=True,
+        help="表格2的路径 (包含 Surname 和 First Name 列)",
+    )
+
+    args = parser.parse_args()
+
+    # 运行主函数
+    compare_with_double_check(args.file1, args.file2)
