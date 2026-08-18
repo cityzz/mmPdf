@@ -1,8 +1,10 @@
 import fitz  # PyMuPDF
 import re
 import argparse
+import csv
 import gc
 import os
+import shutil
 import sys
 
 def save_and_close(doc, name):
@@ -140,6 +142,83 @@ def combine_pdfs(input_dir, output_name, args):
     print(f"[+] Combine task complete. (Total Normal: {total_normal_saved}, Total Surplus: {total_surplus_saved})")
 
 
+def exclude_pdfs_by_customer_csv(input_dir, csv_path, output_dir):
+    """Copies PDFs except those whose filename contains a customer number from a CSV."""
+    if not os.path.isdir(input_dir):
+        print(f"[!] Error: '{input_dir}' is not a valid directory.")
+        sys.exit(1)
+    if not os.path.isfile(csv_path):
+        print(f"[!] Error: CSV file '{csv_path}' does not exist.")
+        sys.exit(1)
+
+    customers = {}
+    try:
+        # utf-8-sig also accepts a UTF-8 CSV that has no BOM.
+        with open(csv_path, "r", encoding="utf-8-sig", newline="") as csv_file:
+            for row_number, row in enumerate(csv.reader(csv_file), start=1):
+                if len(row) < 2:
+                    if row:
+                        print(f"[!] Skipping CSV row {row_number}: expected two columns.")
+                    continue
+
+                name, customer_number = row[0].strip(), row[1].strip()
+                # Allows a normal header such as "Name,Customer Number".
+                if row_number == 1 and "customer" in customer_number.lower():
+                    continue
+                if not customer_number:
+                    print(f"[!] Skipping CSV row {row_number}: customer number is empty.")
+                    continue
+                customers[customer_number] = name
+    except UnicodeDecodeError:
+        print("[!] Error: CSV must be saved as UTF-8 (CSV UTF-8 in Excel).")
+        sys.exit(1)
+    except OSError as error:
+        print(f"[!] Error reading CSV: {error}")
+        sys.exit(1)
+
+    if not customers:
+        print("[!] No customer numbers were found in the CSV.")
+        sys.exit(1)
+
+    os.makedirs(output_dir, exist_ok=True)
+    pdf_files = sorted(
+        filename for filename in os.listdir(input_dir)
+        if filename.lower().endswith(".pdf") and os.path.isfile(os.path.join(input_dir, filename))
+    )
+
+    excluded_numbers = set()
+    copied_count = 0
+    skipped_count = 0
+    for filename in pdf_files:
+        excluded_number = next(
+            (number for number in customers if f"_{number}_" in filename), None
+        )
+        if excluded_number is not None:
+            excluded_numbers.add(excluded_number)
+            continue
+
+        source_path = os.path.join(input_dir, filename)
+        destination_path = os.path.join(output_dir, filename)
+        if os.path.exists(destination_path):
+            print(f"[!] Skipping existing file: {destination_path}")
+            skipped_count += 1
+        else:
+            shutil.copy2(source_path, destination_path)
+            print(f"[>] Copied: {filename}")
+            copied_count += 1
+
+    unmatched_numbers = sorted(set(customers) - excluded_numbers)
+    print(
+        f"[+] Exclusion complete. Copied: {copied_count}; "
+        f"customers excluded: {len(excluded_numbers)}; existing files skipped: {skipped_count}."
+    )
+    if unmatched_numbers:
+        print(f"[!] {len(unmatched_numbers)} excluded customer number(s) had no matching PDF:")
+        for customer_number in unmatched_numbers:
+            name = customers[customer_number]
+            print(f"    {name} ({customer_number})")
+
+
 def process_pdf(args):
     """Original processing logic for a single PDF statement."""
     src = fitz.open(args.input)
@@ -219,6 +298,10 @@ def main():
     parser.add_argument("--combine", nargs=2, metavar=('input_folder', 'output_pdf'),
                         help="Combine all PDFs in a folder: --combine [input_folder] [output_pdf]")
 
+    parser.add_argument("--exclude_by_csv", nargs=3,
+                        metavar=('input_folder', 'customers_csv', 'output_folder'),
+                        help="Copy PDFs excluding filenames that contain _customer_number_ from a two-column CSV.")
+
     parser.add_argument("--shrink", type=float, default=1.0,
                         help="Scale factor (0.1 to 1.0). Default 1.0 (no shrink).")
 
@@ -248,13 +331,16 @@ def main():
         sys.exit(1)
 
     # 路由执行
-    if args.combine:
+    if args.exclude_by_csv:
+        folder, csv_path, output_folder = args.exclude_by_csv
+        exclude_pdfs_by_customer_csv(folder, csv_path, output_folder)
+    elif args.combine:
         folder, out_pdf = args.combine
         combine_pdfs(folder, out_pdf, args)
     else:
         if not args.input or not args.output:
             parser.print_help()
-            print("\n[!] Error: Provide 'input' and 'output' OR use '--combine input_folder output_pdf'")
+            print("\n[!] Error: Provide 'input' and 'output', '--combine', or '--exclude_by_csv'.")
             sys.exit(1)
 
         if not os.path.exists(args.input):

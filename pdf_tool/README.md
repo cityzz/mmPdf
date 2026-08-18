@@ -29,6 +29,16 @@ python pdftool.py --shrink 0.955 --space_top combined-statements.pdf output_pref
 ```bash
 python pdftool.py --combine C:\Document\folder\some_statements output_all.pdf
 ```
+### To exclude PDFs using customer numbers from a CSV file
+
+The CSV must contain two columns: customer name followed by customer number. The
+tool excludes PDFs whose filename contains the complete `_customer_number_`
+segment, then copies all remaining PDFs into the output folder. It does not
+overwrite files already in that folder.
+
+```bash
+python pdftool.py --exclude_by_csv C:\Document\all_statements C:\Document\customers.csv C:\Document\remaining_statements
+```
 ### To shink files with top space and then split to 200 statements each
 ```bash
 python pdftool.py --shrink 0.955 --space_top --batch_size 200 all_statements.pdf output_prefix
