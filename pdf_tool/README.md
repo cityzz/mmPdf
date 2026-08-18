@@ -25,9 +25,24 @@ pip install pymupdf
 ```bash
 python pdftool.py --shrink 0.955 --space_top combined-statements.pdf output_prefix
 ```
-### To combine all pdfs in one folder to one pdf file
+### To combine PDFs into three page-count groups
+
+`--combine` creates up to three files: single-page PDFs are written to
+`output_single.pdf`, PDFs with 2 through `--surplus_pages` pages are written to
+`output.pdf`, and PDFs exceeding that threshold are written to
+`output_surplus.pdf`.
+
 ```bash
-python pdftool.py --combine C:\Document\folder\some_statements output_all.pdf
+python pdftool.py --combine C:\Document\folder\some_statements output_all.pdf --surplus_pages 4
+```
+
+To limit each combined output to a number of source PDFs, add `--batch_size`.
+For example, this creates names such as `output_single_part_1.pdf`,
+`output_part_1.pdf`, and `output_surplus_part_1.pdf`, with at most 200 source
+PDFs in each part.
+
+```bash
+python pdftool.py --combine C:\Document\folder\some_statements output_all.pdf --surplus_pages 4 --batch_size 200
 ```
 ### To exclude PDFs using customer numbers from a CSV file
 

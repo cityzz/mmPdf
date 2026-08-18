@@ -17,7 +17,7 @@ def save_and_close(doc, name):
         print(f"[!] Error saving {name}: {e}")
 
 def combine_pdfs(input_dir, output_name, args):
-    """Combines all PDFs in a directory, separating > surplus_pages docs, with shrink, pad, and batching support."""
+    """Combines PDFs into single-page, normal, and surplus output groups."""
     if not os.path.isdir(input_dir):
         print(f"[!] Error: '{input_dir}' is not a valid directory.")
         sys.exit(1)
@@ -37,18 +37,31 @@ def combine_pdfs(input_dir, output_name, args):
 
     base_name, ext = os.path.splitext(output_name)
 
-    # 初始化文档容器和计数器
-    dest_normal = fitz.open()
-    dest_surplus = fitz.open()
+    # The normal group retains the original output name for backwards compatibility.
+    groups = {
+        "single": {"label": "single-page", "suffix": "_single", "document": fitz.open(),
+                   "batch": 1, "in_batch": 0, "total": 0},
+        "normal": {"label": "normal", "suffix": "", "document": fitz.open(),
+                   "batch": 1, "in_batch": 0, "total": 0},
+        "surplus": {"label": "surplus", "suffix": "_surplus", "document": fitz.open(),
+                    "batch": 1, "in_batch": 0, "total": 0},
+    }
 
-    normal_batch_count = 1
-    surplus_batch_count = 1
+    def group_output_name(group_name, batch_number):
+        suffix = groups[group_name]["suffix"]
+        if args.batch_size == -1:
+            return f"{base_name}{suffix}{ext}"
+        return f"{base_name}{suffix}_part_{batch_number}{ext}"
 
-    normal_in_current_batch = 0
-    surplus_in_current_batch = 0
-
-    total_normal_saved = 0
-    total_surplus_saved = 0
+    def save_group_batch(group_name, continue_batch=True):
+        group = groups[group_name]
+        out_name = group_output_name(group_name, group["batch"])
+        print(f"[>] Writing {out_name} ({group['in_batch']} files)...")
+        save_and_close(group["document"], out_name)
+        if continue_batch:
+            group["document"] = fitz.open()
+            group["in_batch"] = 0
+            group["batch"] += 1
 
     for i, filename in enumerate(pdf_files):
         file_path = os.path.join(input_dir, filename)
@@ -56,9 +69,14 @@ def combine_pdfs(input_dir, output_name, args):
             src = fitz.open(file_path)
             page_count = len(src)
 
-            # 判断分流：是正常文件还是超额文件
-            is_surplus = page_count > args.surplus_pages
-            current_dest = dest_surplus if is_surplus else dest_normal
+            # 分流：单页、2 至 surplus_pages 页、以及超过 surplus_pages 页。
+            if page_count == 1:
+                group_name = "single"
+            elif page_count <= args.surplus_pages:
+                group_name = "normal"
+            else:
+                group_name = "surplus"
+            current_dest = groups[group_name]["document"]
 
             # 遍历当前PDF的每一页，应用 shrink 逻辑
             for page_num in range(page_count):
@@ -84,29 +102,12 @@ def combine_pdfs(input_dir, output_name, args):
 
             src.close()
 
-            # 更新当前 Batch 的计数
-            if is_surplus:
-                surplus_in_current_batch += 1
-                total_surplus_saved += 1
-                # 触发超额文件的 Batch 保存
-                if args.batch_size != -1 and surplus_in_current_batch >= args.batch_size:
-                    out_name = f"{base_name}_surplus_part_{surplus_batch_count}{ext}"
-                    print(f"[>] Writing {out_name} ({surplus_in_current_batch} files)...")
-                    save_and_close(dest_surplus, out_name)
-                    dest_surplus = fitz.open()
-                    surplus_in_current_batch = 0
-                    surplus_batch_count += 1
-            else:
-                normal_in_current_batch += 1
-                total_normal_saved += 1
-                # 触发正常文件的 Batch 保存
-                if args.batch_size != -1 and normal_in_current_batch >= args.batch_size:
-                    out_name = f"{base_name}_part_{normal_batch_count}{ext}"
-                    print(f"[>] Writing {out_name} ({normal_in_current_batch} files)...")
-                    save_and_close(dest_normal, out_name)
-                    dest_normal = fitz.open()
-                    normal_in_current_batch = 0
-                    normal_batch_count += 1
+            # Batch size counts source PDFs, rather than pages.
+            group = groups[group_name]
+            group["in_batch"] += 1
+            group["total"] += 1
+            if args.batch_size != -1 and group["in_batch"] >= args.batch_size:
+                save_group_batch(group_name)
 
         except Exception as e:
             print(f"[!] Error reading {filename}: {e}")
@@ -118,28 +119,19 @@ def combine_pdfs(input_dir, output_name, args):
 
     print("---")
 
-    # 循环结束后，保存最后一批（或不分批时的全部文件）
-    if len(dest_normal) > 0:
-        if args.batch_size == -1:
-            out_name = output_name  # 不分批，用原名
+    # 保存尚未达到 batch_size 的最后一批。
+    for group_name, group in groups.items():
+        if len(group["document"]) > 0:
+            save_group_batch(group_name, continue_batch=False)
         else:
-            out_name = f"{base_name}_part_{normal_batch_count}{ext}"
-        print(f"[>] Saving normal combined PDF to {out_name}...")
-        save_and_close(dest_normal, out_name)
-    else:
-        dest_normal.close()
+            group["document"].close()
 
-    if len(dest_surplus) > 0:
-        if args.batch_size == -1:
-            out_name = f"{base_name}_surplus{ext}"  # 不分批，加 _surplus
-        else:
-            out_name = f"{base_name}_surplus_part_{surplus_batch_count}{ext}"
-        print(f"[>] Saving surplus combined PDF to {out_name}...")
-        save_and_close(dest_surplus, out_name)
-    else:
-        dest_surplus.close()
-
-    print(f"[+] Combine task complete. (Total Normal: {total_normal_saved}, Total Surplus: {total_surplus_saved})")
+    print(
+        "[+] Combine task complete. "
+        f"(Single-page: {groups['single']['total']}, "
+        f"Normal: {groups['normal']['total']}, "
+        f"Surplus: {groups['surplus']['total']})"
+    )
 
 
 def exclude_pdfs_by_customer_csv(input_dir, csv_path, output_dir):
@@ -312,11 +304,11 @@ def main():
                         help="Add a blank page to statements with an odd number of pages.")
 
     parser.add_argument("--batch_size", type=int, default=-1,
-                        help="Number of statements per output file. Default -1 (all in one).")
+                        help="Number of source PDFs per combined output file. Default -1 (all in one).")
 
     # 新增参数：设定区分 surplus 的页数阈值
     parser.add_argument("--surplus_pages", type=int, default=4,
-                        help="Maximum page count for a 'normal' statement. Statements with more pages go to _surplus. Default 4.")
+                        help="Single-page PDFs go to _single; 2 through this page count are normal; more go to _surplus. Default 4.")
 
     args = parser.parse_args()
 
