@@ -16,6 +16,25 @@ def save_and_close(doc, name):
     except Exception as e:
         print(f"[!] Error saving {name}: {e}")
 
+
+def combined_output_name(base_name, ext, group_name, batch_number, batch_size):
+    """Returns the combined PDF filename for a page-count group and batch."""
+    suffixes = {"single": "_single", "normal": "", "surplus": "_surplus"}
+    suffix = suffixes[group_name]
+    if batch_size == -1:
+        return f"{base_name}{suffix}{ext}"
+    return f"{base_name}{suffix}_part_{batch_number}{ext}"
+
+
+def page_count_group(page_count, surplus_pages):
+    """Classifies a PDF by page count for the combine operation."""
+    if page_count == 1:
+        return "single"
+    if page_count <= surplus_pages:
+        return "normal"
+    return "surplus"
+
+
 def combine_pdfs(input_dir, output_name, args):
     """Combines PDFs into single-page, normal, and surplus output groups."""
     if not os.path.isdir(input_dir):
@@ -47,15 +66,11 @@ def combine_pdfs(input_dir, output_name, args):
                     "batch": 1, "in_batch": 0, "total": 0},
     }
 
-    def group_output_name(group_name, batch_number):
-        suffix = groups[group_name]["suffix"]
-        if args.batch_size == -1:
-            return f"{base_name}{suffix}{ext}"
-        return f"{base_name}{suffix}_part_{batch_number}{ext}"
-
     def save_group_batch(group_name, continue_batch=True):
         group = groups[group_name]
-        out_name = group_output_name(group_name, group["batch"])
+        out_name = combined_output_name(
+            base_name, ext, group_name, group["batch"], args.batch_size
+        )
         print(f"[>] Writing {out_name} ({group['in_batch']} files)...")
         save_and_close(group["document"], out_name)
         if continue_batch:
@@ -70,12 +85,7 @@ def combine_pdfs(input_dir, output_name, args):
             page_count = len(src)
 
             # 分流：单页、2 至 surplus_pages 页、以及超过 surplus_pages 页。
-            if page_count == 1:
-                group_name = "single"
-            elif page_count <= args.surplus_pages:
-                group_name = "normal"
-            else:
-                group_name = "surplus"
+            group_name = page_count_group(page_count, args.surplus_pages)
             current_dest = groups[group_name]["document"]
 
             # 遍历当前PDF的每一页，应用 shrink 逻辑
@@ -132,6 +142,60 @@ def combine_pdfs(input_dir, output_name, args):
         f"Normal: {groups['normal']['total']}, "
         f"Surplus: {groups['surplus']['total']})"
     )
+
+
+def dry_run_combine(input_dir, output_name, args):
+    """Writes a CSV showing where each source PDF would be combined."""
+    if not os.path.isdir(input_dir):
+        print(f"[!] Error: '{input_dir}' is not a valid directory.")
+        sys.exit(1)
+
+    pdf_files = sorted(
+        filename for filename in os.listdir(input_dir)
+        if filename.lower().endswith(".pdf") and os.path.isfile(os.path.join(input_dir, filename))
+    )
+    if not pdf_files:
+        print(f"[!] No PDFs found in directory: '{input_dir}'")
+        sys.exit(1)
+
+    if not output_name.lower().endswith(".pdf"):
+        output_name += ".pdf"
+    base_name, ext = os.path.splitext(output_name)
+    report_path = f"{base_name}_dry_run.csv"
+    batches = {name: {"number": 1, "file_count": 0} for name in ("single", "normal", "surplus")}
+    written_rows = 0
+
+    try:
+        with open(report_path, "w", encoding="utf-8-sig", newline="") as report_file:
+            writer = csv.writer(report_file)
+            writer.writerow(["原始文件名", "合并后文件名", "页数"])
+
+            for filename in pdf_files:
+                file_path = os.path.join(input_dir, filename)
+                try:
+                    with fitz.open(file_path) as source_pdf:
+                        page_count = len(source_pdf)
+                except Exception as error:
+                    print(f"[!] Error reading {filename}: {error}")
+                    continue
+
+                group_name = page_count_group(page_count, args.surplus_pages)
+                batch = batches[group_name]
+                combined_name = combined_output_name(
+                    base_name, ext, group_name, batch["number"], args.batch_size
+                )
+                writer.writerow([filename, os.path.basename(combined_name), page_count])
+                written_rows += 1
+
+                batch["file_count"] += 1
+                if args.batch_size != -1 and batch["file_count"] >= args.batch_size:
+                    batch["number"] += 1
+                    batch["file_count"] = 0
+    except OSError as error:
+        print(f"[!] Error writing dry-run CSV '{report_path}': {error}")
+        sys.exit(1)
+
+    print(f"[+] Dry run complete. Wrote {written_rows} rows to {report_path}.")
 
 
 def exclude_pdfs_by_customer_csv(input_dir, csv_path, output_dir):
@@ -290,6 +354,9 @@ def main():
     parser.add_argument("--combine", nargs=2, metavar=('input_folder', 'output_pdf'),
                         help="Combine all PDFs in a folder: --combine [input_folder] [output_pdf]")
 
+    parser.add_argument("--dry-run", action="store_true",
+                        help="With --combine, write a CSV mapping source PDFs to their planned combined output instead of creating PDFs.")
+
     parser.add_argument("--exclude_by_csv", nargs=3,
                         metavar=('input_folder', 'customers_csv', 'output_folder'),
                         help="Copy PDFs excluding filenames that contain _customer_number_ from a two-column CSV.")
@@ -323,12 +390,17 @@ def main():
         sys.exit(1)
 
     # 路由执行
-    if args.exclude_by_csv:
+    if args.dry_run and not args.combine:
+        parser.error("--dry-run can only be used with --combine.")
+    elif args.exclude_by_csv:
         folder, csv_path, output_folder = args.exclude_by_csv
         exclude_pdfs_by_customer_csv(folder, csv_path, output_folder)
     elif args.combine:
         folder, out_pdf = args.combine
-        combine_pdfs(folder, out_pdf, args)
+        if args.dry_run:
+            dry_run_combine(folder, out_pdf, args)
+        else:
+            combine_pdfs(folder, out_pdf, args)
     else:
         if not args.input or not args.output:
             parser.print_help()

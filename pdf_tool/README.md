@@ -44,6 +44,17 @@ PDFs in each part.
 ```bash
 python pdftool.py --combine C:\Document\folder\some_statements output_all.pdf --surplus_pages 4 --batch_size 200
 ```
+
+### To preview combine output without creating PDFs
+
+Add `--dry-run` to write `output_all_dry_run.csv` instead of combining files.
+The CSV contains the original filename, its planned combined output filename, and
+its page count. The preview applies the same page grouping and `--batch_size`
+rules as a real combine.
+
+```bash
+python pdftool.py --combine C:\Document\folder\some_statements output_all.pdf --surplus_pages 4 --batch_size 200 --dry-run
+```
 ### To exclude PDFs using customer numbers from a CSV file
 
 The CSV must contain two columns: customer name followed by customer number. The
