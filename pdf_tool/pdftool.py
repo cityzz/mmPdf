@@ -198,11 +198,8 @@ def dry_run_combine(input_dir, output_name, args):
     print(f"[+] Dry run complete. Wrote {written_rows} rows to {report_path}.")
 
 
-def exclude_pdfs_by_customer_csv(input_dir, csv_path, output_dir):
-    """Copies PDFs except those whose filename contains a customer number from a CSV."""
-    if not os.path.isdir(input_dir):
-        print(f"[!] Error: '{input_dir}' is not a valid directory.")
-        sys.exit(1)
+def load_customers_from_csv(csv_path):
+    """Reads customer names and numbers from a two-column UTF-8 CSV."""
     if not os.path.isfile(csv_path):
         print(f"[!] Error: CSV file '{csv_path}' does not exist.")
         sys.exit(1)
@@ -235,7 +232,16 @@ def exclude_pdfs_by_customer_csv(input_dir, csv_path, output_dir):
     if not customers:
         print("[!] No customer numbers were found in the CSV.")
         sys.exit(1)
+    return customers
 
+
+def exclude_pdfs_by_customer_csv(input_dir, csv_path, output_dir):
+    """Copies PDFs except those whose filename contains a customer number from a CSV."""
+    if not os.path.isdir(input_dir):
+        print(f"[!] Error: '{input_dir}' is not a valid directory.")
+        sys.exit(1)
+
+    customers = load_customers_from_csv(csv_path)
     os.makedirs(output_dir, exist_ok=True)
     pdf_files = sorted(
         filename for filename in os.listdir(input_dir)
@@ -273,6 +279,51 @@ def exclude_pdfs_by_customer_csv(input_dir, csv_path, output_dir):
         for customer_number in unmatched_numbers:
             name = customers[customer_number]
             print(f"    {name} ({customer_number})")
+
+
+def dry_run_exclude_by_customer_csv(input_dir, csv_path, output_dir):
+    """Writes a report of PDFs that would be excluded and customer numbers not found."""
+    if not os.path.isdir(input_dir):
+        print(f"[!] Error: '{input_dir}' is not a valid directory.")
+        sys.exit(1)
+
+    customers = load_customers_from_csv(csv_path)
+    os.makedirs(output_dir, exist_ok=True)
+    report_path = os.path.join(output_dir, "exclude_dry_run.csv")
+    pdf_files = sorted(
+        filename for filename in os.listdir(input_dir)
+        if filename.lower().endswith(".pdf") and os.path.isfile(os.path.join(input_dir, filename))
+    )
+
+    excluded_numbers = set()
+    excluded_files = 0
+    try:
+        with open(report_path, "w", encoding="utf-8-sig", newline="") as report_file:
+            writer = csv.writer(report_file)
+            writer.writerow(["状态", "客户名称", "客户号", "PDF文件名"])
+
+            for filename in pdf_files:
+                excluded_number = next(
+                    (number for number in customers if f"_{number}_" in filename), None
+                )
+                if excluded_number is None:
+                    continue
+
+                excluded_numbers.add(excluded_number)
+                writer.writerow(["已排除", customers[excluded_number], excluded_number, filename])
+                excluded_files += 1
+
+            for customer_number in sorted(set(customers) - excluded_numbers):
+                writer.writerow(["未找到", customers[customer_number], customer_number, ""])
+    except OSError as error:
+        print(f"[!] Error writing dry-run CSV '{report_path}': {error}")
+        sys.exit(1)
+
+    print(
+        f"[+] Exclusion dry run complete. Excluded files: {excluded_files}; "
+        f"customer numbers not found: {len(customers) - len(excluded_numbers)}."
+    )
+    print(f"[+] Wrote report to {report_path}.")
 
 
 def process_pdf(args):
@@ -355,7 +406,7 @@ def main():
                         help="Combine all PDFs in a folder: --combine [input_folder] [output_pdf]")
 
     parser.add_argument("--dry-run", action="store_true",
-                        help="With --combine, write a CSV mapping source PDFs to their planned combined output instead of creating PDFs.")
+                        help="With --combine or --exclude_by_csv, write a CSV preview instead of creating or copying PDFs.")
 
     parser.add_argument("--exclude_by_csv", nargs=3,
                         metavar=('input_folder', 'customers_csv', 'output_folder'),
@@ -390,11 +441,14 @@ def main():
         sys.exit(1)
 
     # 路由执行
-    if args.dry_run and not args.combine:
-        parser.error("--dry-run can only be used with --combine.")
+    if args.dry_run and not (args.combine or args.exclude_by_csv):
+        parser.error("--dry-run can only be used with --combine or --exclude_by_csv.")
     elif args.exclude_by_csv:
         folder, csv_path, output_folder = args.exclude_by_csv
-        exclude_pdfs_by_customer_csv(folder, csv_path, output_folder)
+        if args.dry_run:
+            dry_run_exclude_by_customer_csv(folder, csv_path, output_folder)
+        else:
+            exclude_pdfs_by_customer_csv(folder, csv_path, output_folder)
     elif args.combine:
         folder, out_pdf = args.combine
         if args.dry_run:

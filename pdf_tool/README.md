@@ -65,6 +65,14 @@ overwrite files already in that folder.
 ```bash
 python pdftool.py --exclude_by_csv C:\Document\all_statements C:\Document\customers.csv C:\Document\remaining_statements
 ```
+
+To preview exclusions without copying PDFs, add `--dry-run`. It writes
+`exclude_dry_run.csv` inside the output folder. The report lists every excluded
+PDF and every customer number from the CSV that did not match a PDF.
+
+```bash
+python pdftool.py --exclude_by_csv C:\Document\all_statements C:\Document\customers.csv C:\Document\remaining_statements --dry-run
+```
 ### To shink files with top space and then split to 200 statements each
 ```bash
 python pdftool.py --shrink 0.955 --space_top --batch_size 200 all_statements.pdf output_prefix
