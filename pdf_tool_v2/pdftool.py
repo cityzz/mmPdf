@@ -8,8 +8,8 @@
 - 全流程零拷贝 (Zero-Copy Manifest Architecture): 原目录严格只读，以清单追踪状态。
 - Stage 1: 递归扫描目录，依据初始 CSV 排除客户，生成待复核清单 (<= 2页) 与 remaining_files.txt。
 - Stage 2: 依据更新后的 CSV 二次排除，支持 Newsletter 独立合并 (不补白不分批)，
-          常规账单 (<= 6页) 与大账单 (> 6页) 对称分批合并，大账单奇数页自动补齐空白背页，
-          并输出打印统计报表。
+          常规A组 (<= 4页)、中间过渡Mid组 (如 5~6页)、超长B组 (>= 7页) 对称分批合并，
+          超长B组奇数页自动补齐空白背页，并输出打印统计报表。
 """
 
 import os
@@ -390,7 +390,7 @@ def run_stage1(args: argparse.Namespace) -> None:
 # 5. Stage 2: 二次排除、多轨分类合并与打印统计
 # ==============================================================================
 
-def print_page_distribution_report(group_b_statements: List[StatementInfo], report_path: Path) -> None:
+def print_page_distribution_report(group_b_statements: List[StatementInfo], report_path: Path, min_pages: int = 7) -> None:
     """输出分组 B (超长账单) 补白后的打印页数统计报表"""
     # 统计数据模型
     # final_pages -> {original_page_count: count}
@@ -405,7 +405,7 @@ def print_page_distribution_report(group_b_statements: List[StatementInfo], repo
 
     lines = []
     lines.append("=" * 80)
-    lines.append("                    大文件 (>6页) 打印页数统计报表")
+    lines.append(f"                    大文件 (≥{min_pages}页) 打印页数统计报表")
     lines.append("=" * 80)
     lines.append(f"{'最终打印页数':<14}{'原文件页数分布构成':<28}{'文件数量(份)':<14}{'占比(%)':<12}{'总打印面数(P)'}")
     lines.append("-" * 80)
@@ -458,6 +458,11 @@ def run_stage2(args: argparse.Namespace) -> None:
         print("[!] 错误: Stage 2 必须指定输入源 (--input_dir 或 --remaining-files)！")
         sys.exit(1)
 
+    # 3. 校验页数界限: large_min_pages 必须大于 normal_pages
+    if args.large_min_pages <= args.normal_pages:
+        print(f"[!] 错误: 超长B组下限 (--large_min_pages={args.large_min_pages}) 必须大于常规A组上限 (--normal_pages={args.normal_pages})！")
+        sys.exit(1)
+
     # 3. 加载二次更新后的排除名单 (CSV 1)
     exclude_csv_path = Path(args.exclude_csv).resolve()
     exclude_map = load_clients_csv(exclude_csv_path)
@@ -505,27 +510,35 @@ def run_stage2(args: argparse.Namespace) -> None:
         print("[*] 已显式声明 --no-newsletter: 不进行 Newsletter 独立分流。")
         regular_statements = retained
 
-    # 7. 常规账单分类: A 组 (<= normal_pages) vs B 组 (> normal_pages)
+    # 7. 账单分类: A 组 (<= normal_pages) vs Mid 组 (normal_pages < pages < large_min_pages) vs B 组 (>= large_min_pages)
     normal_pages_threshold = args.normal_pages
+    large_min_pages_threshold = args.large_min_pages
     group_a: List[StatementInfo] = []
+    group_mid: List[StatementInfo] = []
     group_b: List[StatementInfo] = []
 
     for stmt in regular_statements:
         if stmt.page_count <= normal_pages_threshold:
             group_a.append(stmt)
+        elif stmt.page_count < large_min_pages_threshold:
+            group_mid.append(stmt)
         else:
             group_b.append(stmt)
 
     # 8. 全局文件名字母升序排序 (确保稳定可重现)
     newsletter_statements.sort(key=lambda s: s.path.name.lower())
     group_a.sort(key=lambda s: s.path.name.lower())
+    group_mid.sort(key=lambda s: s.path.name.lower())
     group_b.sort(key=lambda s: s.path.name.lower())
 
     print("\n" + "-" * 60)
     print(f" 分流统计结果:")
     print(f"  - 分组 N (Newsletter 独立) : {len(newsletter_statements)} 份 (不分批、不补白)")
     print(f"  - 分组 A (主力常规 ≤ {normal_pages_threshold}页)  : {len(group_a)} 份 (不补白)")
-    print(f"  - 分组 B (超长特殊 > {normal_pages_threshold}页)  : {len(group_b)} 份 (奇数页补空白背页)")
+    if large_min_pages_threshold - normal_pages_threshold > 1:
+        gap_desc = f"{normal_pages_threshold + 1}~{large_min_pages_threshold - 1}页"
+        print(f"  - 分组 Mid (中间过渡 {gap_desc})   : {len(group_mid)} 份 (不补白)")
+    print(f"  - 分组 B (超长特殊 ≥ {large_min_pages_threshold}页)  : {len(group_b)} 份 (奇数页补空白背页)")
     print("-" * 60)
 
     # 9. 准备输出前缀与自动创建父目录
@@ -560,9 +573,27 @@ def run_stage2(args: argparse.Namespace) -> None:
                 merge_statements(batch_slice, out_file, pad_odd_pages=False)
                 print(f"[+] 已生成 Part {part_idx + 1}/{total_parts}: {out_file.name} ({len(batch_slice)} 份)")
 
-    # --- 执行合并 C: 分组 B (超长账单，奇数页补白，按 batch_size 分批) ---
+    # --- 执行合并 C: 分组 Mid (中间过渡文件，不补白，按 batch_size 分批) ---
+    if group_mid:
+        gap_desc = f"{normal_pages_threshold + 1}~{large_min_pages_threshold - 1}页" if large_min_pages_threshold - normal_pages_threshold > 1 else ""
+        print(f"\n[>] 正在合并中间过渡账单 Group Mid ({len(group_mid)} 份，{gap_desc}，不补白)...")
+        if batch_size <= 0:
+            out_file = base_dir / f"{base_stem}_mid.pdf"
+            print(f"    (不分批合并至单文件: {out_file.name})")
+            merge_statements(group_mid, out_file, pad_odd_pages=False)
+            print(f"[+] 已生成: {out_file.resolve()}")
+        else:
+            total_parts = (len(group_mid) + batch_size - 1) // batch_size
+            print(f"    (按每 {batch_size} 份分批，共 {total_parts} 个 Part)")
+            for part_idx in range(total_parts):
+                batch_slice = group_mid[part_idx * batch_size : (part_idx + 1) * batch_size]
+                out_file = base_dir / f"{base_stem}_mid_part_{part_idx + 1}.pdf"
+                merge_statements(batch_slice, out_file, pad_odd_pages=False)
+                print(f"[+] 已生成 Mid Part {part_idx + 1}/{total_parts}: {out_file.name} ({len(batch_slice)} 份)")
+
+    # --- 执行合并 D: 分组 B (超长账单，奇数页补白，按 batch_size 分批) ---
     if group_b:
-        print(f"\n[>] 正在合并超长账单 Group B ({len(group_b)} 份，奇数页自动补白)...")
+        print(f"\n[>] 正在合并超长账单 Group B ({len(group_b)} 份，≥{large_min_pages_threshold}页，奇数页自动补白)...")
         if batch_size <= 0:
             out_file = base_dir / f"{base_stem}_large.pdf"
             print(f"    (不分批合并至单文件: {out_file.name})")
@@ -579,7 +610,7 @@ def run_stage2(args: argparse.Namespace) -> None:
 
         # 打印并导出大文件打印统计报表
         stats_path = base_dir / f"{base_stem}_large_stats.txt"
-        print_page_distribution_report(group_b, stats_path)
+        print_page_distribution_report(group_b, stats_path, min_pages=large_min_pages_threshold)
 
     print("\n" + "=" * 70)
     print("                      Stage 2 全部合并任务完成！")
@@ -631,7 +662,9 @@ def main():
                             help="显式声明本次批次无需处理 Newsletter 客户")
 
     p2.add_argument("--output_prefix", default="combined", help="输出文件名前缀及路径 (默认: ./combined)")
-    p2.add_argument("--normal_pages", type=int, default=6, help="主力常规账单的最高页数界限 (默认: 6页)")
+    p2.add_argument("--normal_pages", type=int, default=4, help="主力常规A组的最高页数界限 (默认: 4页)")
+    p2.add_argument("--large_min_pages", "--large_pages", dest="large_min_pages", type=int, default=7,
+                    help="超长B组的最低页数下限 (默认: 7页)。若与 normal_pages 存在差值将生成中间过渡组")
     p2.add_argument("--batch_size", type=int, default=100, help="每批次包含的原始 PDF 份数 (默认: 100)")
     p2.add_argument("--no_batch", "--no-batch", dest="no_batch", action="store_true",
                     help="不分批，将整组文件合并为一个单独的文件")
